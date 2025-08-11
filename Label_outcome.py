@@ -8,11 +8,14 @@ except FileNotFoundError:
     print("Shared filename file not found. Please run the data fetch script first.")
     exit()
 
+
+cleaned_filename = input_file.replace(".csv", "_cleaned.csv")
+
 # Step 2: Load the CSV
 try:
-    df = pd.read_csv(input_file)
+    df = pd.read_csv(cleaned_filename)
 except FileNotFoundError:
-    print(f"File '{input_file}' not found.")
+    print(f"File '{cleaned_filename}' not found.")
     exit()
 
 # Step 3: Label "effective" pitches
@@ -28,9 +31,15 @@ df['effective'] = df['description'].isin(effective_descriptions).astype(int)
 df.loc[(df['description'] == 'foul') & (df['strikes'] == 2), 'effective'] = 1
 
 # Step 4: Save the labeled version
-output_file = input_file.replace('_cleaned.csv', '_labeled.csv')
+output_file = cleaned_filename.replace('_cleaned.csv', '_labeled.csv')
 df.to_csv(output_file, index=False)
 
 # Step 5: Show preview
 print(f"Labeled data saved to '{output_file}'")
 print(df[['pitch_type', 'description', 'strikes', 'effective']].head())
+
+''' TO DO --------------------------------------------------------------------
+add more effective descriptions 
+figure out how to label a tunnel pitch  
+label effective events, currently any hit is considered an ineffective pitch even if it was weak contact that results in an out
+-----------------------------------------------------------------'''
