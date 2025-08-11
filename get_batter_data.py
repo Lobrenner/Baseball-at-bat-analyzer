@@ -42,5 +42,21 @@ filename = f"{last_name.lower()}_{first_name.lower()}_2023.csv"
 df.to_csv(filename, index=False)
 print(f"Saved data to {filename}")
 
+
+#save filename (Batter Name)
+with open("last_batter_filename.txt", "w") as f:
+    f.write(filename)
+
 # Show preview
 print(df_cleaned.head())
+
+df = pd.read_csv(filename)
+
+# label effective pitches
+'''
+effective_description = [
+    'swinging_strike',
+    'swingin_strike_blocked';
+    'called_strike'
+]
+'''
