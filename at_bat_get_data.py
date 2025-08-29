@@ -6,7 +6,7 @@ try:
     from pybaseball import playerid_lookup, statcast_batter
 except Exception as e:
     print("ERROR: pybaseball is required. Activate your venv and install with:")
-    print("       pip install pybaseball pandas")
+    print("       pip install pybaseball")
     raise
 
 import pandas as pd
