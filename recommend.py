@@ -1,5 +1,5 @@
 """
-train_and_recommend.py
+recommend.py
 
 What this does:
 1) Loads the labeled CSV created by one_button_pipeline.py (from ./data/).
@@ -9,7 +9,7 @@ What this does:
 
 Run:
     source .venv/bin/activate
-    python train_and_recommend.py
+    python recommend.py
 
 It will prompt for:
 - Batter first/last name and season (to locate ./data/<last>_<first>_<season>_cleaned_labeled.csv)
