@@ -1,0 +1,28 @@
+#TODO LIST
+
+*Make analyzer ask for pitcher and tailor pitch sequence for the pitcher
+*Display weakest and strongest pitches against for batter
+*Display more general stats for batter, batting avg. obp. ops.
+*Add label "Tunnel" for set up pitches
+*Recommender currently recommends the batters weakest pitch for every pitch in the sequence, must make the AI understand tunnel pitches and how throwing the same pitch multiple times in an at-bat increases the chances of it being hit
+
+
+
+#POSSIBLE IMPROVEMENTS
+
+*Add pitch tunneling
+
+*Use at_bat_number +  pitch_number.
+
+*Train separate models per count and have the program choose the correct model depending on the count.
+
+*Filter data to LHP vs RHP separately or add features for handedness interactions.
+
+*Use something other than Greedy, possibly beam search
+
+*Weight outcomes differently to shape model behavior.
+
+*Display pitch location instead of simply saying zone #.
+
+*Display batter heat maps
+
