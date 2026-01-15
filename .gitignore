@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Data / models (usually too large for GitHub)
+data/
+models/
+*.pt
+*.parquet
+
+# Logs
+*.log
