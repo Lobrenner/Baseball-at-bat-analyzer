@@ -116,6 +116,7 @@ Planned Extensions
 
 - Larger training data set
 
+- Implement "stuff-awareness" (some pitchers may have better pitches than others even if they throw the same pitch type). Model should understand understand when a pitcher has a specific unique/dominant pitch that would be more effective than if it came form a different pitcher
 
 Notes
 
