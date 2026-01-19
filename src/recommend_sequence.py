@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import copy
 from typing import Dict, List, Tuple
 
 import torch
@@ -71,8 +70,8 @@ def pitcher_arsenal(data_path: str, pitcher_id: int) -> List[str]:
         .unique()
         .tolist()
     )
-    # Drop weird ones you never want to recommend
-    banned = {"PO"}  # pitchout
+    # Drop weird pitch recommendations
+    banned = {"PO"}  # pitchout: what even is this
     pitches = [x for x in pitches if x not in banned]
     print(f"[ARSENAL] pitcher={pitcher_id} unique_pitches={len(pitches)} from {data_path}")
     return sorted(pitches)
