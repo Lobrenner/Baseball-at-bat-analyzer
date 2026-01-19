@@ -15,20 +15,6 @@ Key Features
 - Repeat penalties and pitch tunneling heuristics
 - Pitcher-specific arsenals (only recommends pitches a pitcher actually throws)
 
-Project Structure
-PitchSense/
-├── src/
-│   ├── download.py              # Download raw Statcast data
-│   ├── prep_outcomes.py                  # Clean & preprocess data
-│   ├── train_outcomes.py        # Train PyTorch outcome model
-│   ├── recommend_sequence.py    # Recommend multi-pitch sequences
-│   └── train.py                 # Experimental / legacy training script
-├── data/
-│   ├── raw/                     # Raw downloaded Statcast data (ignored by git)
-│   └── processed/               # Cleaned model-ready data (ignored by git)
-├── models/                      # Trained PyTorch models (ignored by git)
-└── README.md
-
 Installation
 Requirements
 
