@@ -76,17 +76,17 @@ models/pitchsense_outcomes_pitcher_v1/
 
 Uses beam search to recommend a sequence of pitches optimized for pitcher success.
 
-python src\recommend_sequence.py `
-  --modeldir models\pitchsense_outcomes_pitcher_v1 `
-  --data data\processed\pitchsense_outcomes_pitcher_v1.parquet `
-  --pitcher 669373 `
-  --stand L `
-  --p_throws L `
-  --balls 0 `
-  --strikes 2 `
-  --prev1 FF `
-  --prev2 SL `
-  --beam_width 5 `
+python src\recommend_sequence.py
+  --modeldir models\pitchsense_outcomes_pitcher_v1
+  --data data\processed\pitchsense_outcomes_pitcher_v1.parquet
+  --pitcher 669373
+  --stand L
+  --p_throws L
+  --balls 0
+  --strikes 2
+  --prev1 FF
+  --prev2 SL
+  --beam_width 5
   --depth 3
 
 
