@@ -1,3 +1,6 @@
+#Test file for prject related files
+#current test file: prep_outcomes.py
+
 from __future__ import annotations
 
 import argparse
@@ -11,13 +14,11 @@ import pandas as pd
 import torch
 import torch.nn as nn
 
+from pybaseball import playerid_reverse_lookup
 
-## EXAMPLE EXECUTE COMMAND: python src\pybaseball_test.py --modeldir models\Test_v5 --data data\Test\big_data.parquet --pitcher 669373 --stand L --p_throws L --balls 3 --strikes 0 --beam_width 2 --depth 4 --batter 701538 --explain  --explain_top 2
-## For the above command, change the names of files/folders to whatever you have yours for --modeldir and --data
-
-
-
+# -----------------------------
 # Model (must match train_outcomes.py)
+# -----------------------------
 class OutcomeMLP(nn.Module):
     def __init__(
         self,
@@ -95,9 +96,7 @@ def load_model(modeldir: str, device: torch.device):
     return model, encoders, y_enc, cat_cols, num_cols, target_col
 
 
-# -----------------------------
-# Arsenal (restored from original)
-# -----------------------------
+#Get pitcher arsenal from existing data
 def pitcher_arsenal(data_path: str, pitcher_id: int) -> List[str]:
     df = pd.read_parquet(data_path, columns=["pitcher", "pitch_action"])
     p = str(pitcher_id)
@@ -126,9 +125,7 @@ def filter_actions_by_arsenal(actions: List[str], allowed_pitches: List[str]) ->
     return out
 
 
-# -----------------------------
 # Helpers
-# -----------------------------
 TERMINAL = {"K", "BB", "HIT", "BIP_OUT"}
 
 
@@ -362,6 +359,7 @@ def beam_search(
     y_enc: LabelEncoder,
     cat_cols: List[str],
     pitcher: int,
+    batter: int,
     stand: str,
     p_throws: str,
     balls: int,
@@ -379,7 +377,7 @@ def beam_search(
     action_encoder = encoders["pitch_action"]
     actions = [a for a in action_encoder.classes_ if a != "__UNK__"]
 
-    # Restore arsenal restriction (optional but recommended)
+    # arsenal restriction 
     if data_path is not None:
         try:
             allowed = pitcher_arsenal(data_path, pitcher)
@@ -416,9 +414,10 @@ def beam_search(
                 p_term_exp = 0.0
 
                 # expected over current count distribution
-                for (cb, cs), w in b.count_dist.items():
+                for (cb, cs), w in b.count_dist.items(): #cb=called balls, cs=called strikes
                     feat = {
                         "pitcher": str(pitcher),
+                        "batter": str(batter),
                         "stand": stand,
                         "p_throws": p_throws,
                         "prev_action_1": b.prev1,
@@ -459,7 +458,7 @@ def beam_search(
                 # Early stop if terminal is likely (keep, but can be tuned)
                 done = b.done
                 if p_term_exp >= 0.60:
-                    done = False     #This makes it so early stop never happens, still deciding if I want that or not
+                    done = False # make sure early stop never actually happens
 
                 pitch_type, loc_bucket = split_action(action)
                 eb0, es0 = expected_count(b.count_dist)
@@ -469,6 +468,7 @@ def beam_search(
                 (map_b, map_s) = max(b.count_dist.items(), key=lambda kv: kv[1])[0]
                 feat_map = {
                     "pitcher": str(pitcher),
+                    "batter": str(batter),
                     "stand": stand,
                     "p_throws": p_throws,
                     "prev_action_1": b.prev1,
@@ -531,7 +531,10 @@ def main():
     )
     parser.add_argument("--modeldir", default="models/pitchsense_outcomes_v0")
     parser.add_argument("--data", default=None, help="Optional parquet path used to infer pitcher arsenal")
-    parser.add_argument("--pitcher", required=True, type=int)
+    #Requiring both pitcher and batter for now, this will probably change in the future to only require one or the other
+    parser.add_argument("--pitcher", required=True, type=int) #Ptcher and Batter are type int because it the input is the players MLBAM ID number not their name
+    parser.add_argument("--batter", required=True, type=int)
+
     parser.add_argument("--stand", required=True, choices=["L", "R"])
     parser.add_argument("--p_throws", required=True, choices=["L", "R"])
     parser.add_argument("--balls", required=True, type=int)
@@ -563,6 +566,7 @@ def main():
         y_enc=y_enc,
         cat_cols=cat_cols,
         pitcher=args.pitcher,
+        batter=args.batter,
         stand=args.stand,
         p_throws=args.p_throws,
         balls=args.balls,
@@ -579,6 +583,7 @@ def main():
         "mode": "sequence",
         "state": {
             "pitcher": args.pitcher,
+            "batter": args.batter,
             "stand": args.stand,
             "p_throws": args.p_throws,
             "balls": args.balls,
@@ -612,6 +617,7 @@ def main():
     print("\nPitchSense — Sequence Recommendations (stochastic count)\n")
     print(
         f"pitcher={args.pitcher} stand={args.stand} p_throws={args.p_throws} "
+        f"batter={args.batter } "
         f"start_count={args.balls}-{args.strikes} prev1={prev1} prev2={prev2}\n"
     )
 
