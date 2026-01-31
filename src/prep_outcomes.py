@@ -52,9 +52,36 @@ def load_parquets(indir: str) -> pd.DataFrame:
         raise FileNotFoundError(f"No parquet files found in: {indir}")
 
     dfs = []
+    skipped = 0
+
     for p in paths:
-        dfs.append(pd.read_parquet(p, columns=KEEP_COLS))
-    return pd.concat(dfs, ignore_index=True)
+        try:
+            df0 = pd.read_parquet(p)  # read whole file to validate schema
+        except Exception as e:
+            print(f"[SKIP] {os.path.basename(p)} unreadable parquet: {e}")
+            skipped += 1
+            continue
+
+        if df0 is None or len(df0) == 0:
+            print(f"[SKIP] {os.path.basename(p)} is empty")
+            skipped += 1
+            continue
+
+        missing = [c for c in KEEP_COLS if c not in df0.columns]
+        if missing:
+            print(f"[SKIP] {os.path.basename(p)} missing required cols: {missing}")
+            skipped += 1
+            continue
+
+        dfs.append(df0[KEEP_COLS])
+
+    if not dfs:
+        raise RuntimeError(f"All parquet files were empty/bad in: {indir}")
+
+    out = pd.concat(dfs, ignore_index=True)
+    print(f"[LOAD] kept={len(dfs)} skipped={skipped} rows={len(out)}")
+    return out
+
 
 
 def add_prev_action_features(df: pd.DataFrame) -> pd.DataFrame:

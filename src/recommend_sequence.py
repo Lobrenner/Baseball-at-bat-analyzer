@@ -12,9 +12,12 @@ import torch
 import torch.nn as nn
 
 
-# -----------------------------
+## EXAMPLE EXECUTE COMMAND: python src\pybaseball_test.py --modeldir models\Test_v5 --data data\Test\big_data.parquet --pitcher 669373 --stand L --p_throws L --balls 3 --strikes 0 --beam_width 2 --depth 4 --batter 701538 --explain  --explain_top 2
+## For the above command, change the names of files/folders to whatever you have yours for --modeldir and --data
+
+
+
 # Model (must match train_outcomes.py)
-# -----------------------------
 class OutcomeMLP(nn.Module):
     def __init__(
         self,
@@ -456,7 +459,7 @@ def beam_search(
                 # Early stop if terminal is likely (keep, but can be tuned)
                 done = b.done
                 if p_term_exp >= 0.60:
-                    done = True
+                    done = False     #This makes it so early stop never happens, still deciding if I want that or not
 
                 pitch_type, loc_bucket = split_action(action)
                 eb0, es0 = expected_count(b.count_dist)
