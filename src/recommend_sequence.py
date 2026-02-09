@@ -14,11 +14,9 @@ import pandas as pd
 import torch
 import torch.nn as nn
 
-from pybaseball import playerid_reverse_lookup
+#from pybaseball import playerid_reverse_lookup
 
-# -----------------------------
 # Model (must match train_outcomes.py)
-# -----------------------------
 class OutcomeMLP(nn.Module):
     def __init__(
         self,
@@ -102,13 +100,16 @@ def pitcher_arsenal(data_path: str, pitcher_id: int) -> List[str]:
     p = str(pitcher_id)
 
     sub = df[df["pitcher"].astype(str) == p]["pitch_action"].dropna().astype(str)
-
+    
     # pitch_action looks like "FF|Z1" -> pitch_type is before "|"
-    pitches = sub.str.split("|", n=1, expand=True)[0].unique().tolist()
-
+    pitches = sub.str.split("|", n=1, expand=True)[0]  #.unique().tolist()
+    freq = pitches.value_counts(normalize=True) #How often is each pitch thrown 
+    freq = freq[freq >= 0.01] #remove pitches that are thrown less than 1 percent of the time, they just don't matter
+    pitches = freq.index.tolist()
     banned = {"PO"}
     pitches = [x for x in pitches if x not in banned]
     print(f"[ARSENAL] pitcher={pitcher_id} unique_pitches={len(pitches)} from {data_path}")
+
     return sorted(pitches)
 
 
