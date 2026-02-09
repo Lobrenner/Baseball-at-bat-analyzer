@@ -105,7 +105,7 @@ def main():
     print("[OUTCOME COUNTS]\n", df["outcome"].value_counts().head(12))
 
     # Categorical features (state + action)
-    cat_cols = ["pitcher", "stand", "p_throws", "prev_pitch_type_1", "prev_pitch_type_2", "pitch_type"]
+    cat_cols = ["pitcher", "batter", "stand", "p_throws", "prev_action_1", "prev_action_2", "pitch_action"]
     # Numeric features
     num_cols = ["balls", "strikes"]
     target_col = "outcome"

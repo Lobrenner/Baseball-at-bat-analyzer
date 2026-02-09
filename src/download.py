@@ -52,7 +52,8 @@ def main():
                 df = download_day(day)
 
                 if df is None or len(df) == 0:
-                    print(f"[WARN] {day} returned 0 rows. Saving anyway.")
+                    print(f"[WARN] {day} returned 0 rows. Skipping save.")
+                    continue
                 else:
                     print(f"[OK] {day} rows={len(df)} cols={len(df.columns)}")
 
