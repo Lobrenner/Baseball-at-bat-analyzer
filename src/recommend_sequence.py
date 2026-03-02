@@ -14,11 +14,9 @@ import pandas as pd
 import torch
 import torch.nn as nn
 
-from pybaseball import playerid_reverse_lookup
+#from pybaseball import playerid_reverse_lookup
 
-# -----------------------------
 # Model (must match train_outcomes.py)
-# -----------------------------
 class OutcomeMLP(nn.Module):
     def __init__(
         self,
@@ -102,13 +100,16 @@ def pitcher_arsenal(data_path: str, pitcher_id: int) -> List[str]:
     p = str(pitcher_id)
 
     sub = df[df["pitcher"].astype(str) == p]["pitch_action"].dropna().astype(str)
-
+    
     # pitch_action looks like "FF|Z1" -> pitch_type is before "|"
-    pitches = sub.str.split("|", n=1, expand=True)[0].unique().tolist()
-
-    banned = {"PO"}
+    pitches = sub.str.split("|", n=1, expand=True)[0]  #.unique().tolist()
+    freq = pitches.value_counts(normalize=True) #How often is each pitch thrown 
+    freq = freq[freq >= 0.01] #remove pitches that are thrown less than 1 percent of the time, they just don't matter
+    pitches = freq.index.tolist()
+    banned = {"PO",}
     pitches = [x for x in pitches if x not in banned]
     print(f"[ARSENAL] pitcher={pitcher_id} unique_pitches={len(pitches)} from {data_path}")
+
     return sorted(pitches)
 
 
@@ -127,6 +128,101 @@ def filter_actions_by_arsenal(actions: List[str], allowed_pitches: List[str]) ->
 
 # Helpers
 TERMINAL = {"K", "BB", "HIT", "BIP_OUT"}
+
+
+#going by single inning could get too specific and overfit, bucketing for hopefully better accuracy
+def inning_bucket(inning: Optional[int]) -> str:
+    # neutral default if not provided
+    if inning is None:
+        return "mid"
+    if inning <= 3:
+        return "early"
+    if inning <= 6:
+        return "mid"
+    if inning <= 9:
+        return "late"
+    return "extras"
+
+#
+def tto_bucket(n):
+    try:
+        val = int(n)
+    except Exception:
+        return "1"   # safe default
+
+    if val == 1:
+        return "1"   # first time through
+    if val == 2:
+        return "2"   # second time
+    return "3+"      # third or more
+
+
+def base_state(on_1b: bool, on_2b: bool, on_3b: bool) -> str:
+    return f"{'1' if on_1b else '-'}{'2' if on_2b else '-'}{'3' if on_3b else '-'}"
+
+#Runners in scoring position
+#def risp(on_2b: bool, on_3b: bool) -> bool:
+#    return bool(on_2b or on_3b)
+
+def recommend_from_raw_state(
+    *,
+    model: nn.Module,
+    encoders: Dict[str, LabelEncoder],
+    y_enc: LabelEncoder,
+    cat_cols: List[str],
+    num_cols: List[str],
+    device: torch.device,
+    data_path: Optional[str],
+    pitcher: int,
+    batter: int,
+    stand: str,
+    p_throws: str,
+    balls: int,
+    strikes: int,
+    prev1: str,
+    prev2: str,
+    outs: int = 0,
+    on_1b: int = 0,
+    on_2b: int = 0,
+    on_3b: int = 0,
+    inning: Optional[int] = None,
+    tto: Optional[int] = None,
+    depth: int = 4,
+    beam_width: int = 8,
+):
+    # derive features using YOUR canonical logic
+    ib = inning_bucket(inning)
+    tb = tto_bucket(tto)
+    bs = base_state(bool(on_1b), bool(on_2b), bool(on_3b))
+    rc = int(bool(on_1b)) + int(bool(on_2b)) + int(bool(on_3b))
+
+    prev1 = normalize_prev_action(prev1)
+    prev2 = normalize_prev_action(prev2)
+
+    return beam_search(
+        model=model,
+        encoders=encoders,
+        y_enc=y_enc,
+        cat_cols=cat_cols,
+        num_cols=num_cols,
+        pitcher=pitcher,
+        batter=batter,
+        stand=stand,
+        p_throws=p_throws,
+        balls=balls,
+        strikes=strikes,
+        prev1=prev1,
+        prev2=prev2,
+        depth=depth,
+        beam_width=beam_width,
+        device=device,
+        data_path=data_path,
+        inning_bucket_value=ib,
+        base_state_value=bs,
+        runners_count_value=rc,
+        tto_bucket_value=tb,
+        outs_value=outs,
+    )
 
 
 def normalize_prev_action(s: str) -> str:
@@ -211,7 +307,7 @@ def normalize_dist(dist: Dict[Tuple[int, int], float]) -> Dict[Tuple[int, int], 
     return {k: v / tot for k, v in dist.items()}
 
 
-def advance_count_distribution( #Asked chatgpt to do this and it kinda sucked ngl
+def advance_count_distribution( 
     dist: Dict[Tuple[int, int], float],
     pm: Dict[str, float],
 ) -> Dict[Tuple[int, int], float]:
@@ -219,10 +315,18 @@ def advance_count_distribution( #Asked chatgpt to do this and it kinda sucked ng
     Propagate count distribution using BALL/STRIKE/FOUL, and treat everything else as "stay".
     This keeps counts integer and realistic.
     """
-    p_ball = pm.get("BALL", 0.0)
-    p_strike = pm.get("STRIKE", 0.0)
-    p_foul = pm.get("FOUL", 0.0)
 
+    #Handle the count continuing
+    p_term = pm.get("K", 0) + pm.get("BB", 0) + pm.get("BIP_OUT", 0) + pm.get("HIT", 0) #probably of at bat ending
+    p_continue = max(1e-9, 1.0 - p_term)
+
+    #### STILL NEEDS THOROUGHG TESTING
+
+    p_ball = pm.get("BALL", 0.0) / p_continue
+    p_strike = pm.get("STRIKE", 0.0) / p_continue
+    p_foul = pm.get("FOUL", 0.0) / p_continue
+
+    #probably the count continues or stays (could stay from expected foul ball on two trikes)
     p_move = p_ball + p_strike + p_foul
     p_stay = max(0.0, 1.0 - p_move)
 
@@ -252,7 +356,7 @@ def expected_count(dist: Dict[Tuple[int, int], float]) -> Tuple[float, float]:
 
 
 def count_risk_penalty_from_dist(dist: Dict[Tuple[int, int], float]) -> float:
-    # same spirit as earlier: avoid drifting into 3-ball danger
+    #avoid drifting into 3-ball danger
     p3 = sum(p for (b, s), p in dist.items() if b == 3)
     p2 = sum(p for (b, s), p in dist.items() if b == 2)
     p2str = sum(p for (b, s), p in dist.items() if s == 2)
@@ -265,7 +369,7 @@ def pitch_type_of(action_or_prev: str) -> str:
     return action_or_prev.split("|", 1)[0]
 
 
-def repeat_penalty_original_style( #asked chat to do this to and it sucked again, but whatever ill clean it up later
+def repeat_penalty( 
     prev1: str,
     prev2: str,
     action: str,
@@ -276,7 +380,7 @@ def repeat_penalty_original_style( #asked chat to do this to and it sucked again
       - allow 2 in a row sometimes
       - discourage 3+ strongly
       - scale up penalty when you're "behind / risky"
-    Applied to pitch TYPE (not location-specific), which is more baseball-realistic.
+    Applied to pitch TYPE (not location-specific)
     """
     pitch = pitch_type_of(action)
     p1 = pitch_type_of(prev1)
@@ -315,19 +419,44 @@ def alternation_penalty(
     return 0.0
 
 
+def build_num_row(num_cols, balls, strikes, runners_count, outs):
+    row = []
+    for c in num_cols:
+        if c == "balls":
+            row.append(balls / 3.0)
+        elif c == "strikes":
+            row.append(strikes / 2.0)
+        elif c == "runners_count":
+            row.append(runners_count / 3.0)
+        elif c == "outs":
+            row.append(outs / 2.0)
+        else:
+            # unknown numeric feature in saved model; safest default
+            row.append(0.0)
+    return np.array([row], dtype=np.float32)
 
+# create probability map (pm) for pitch outcomes 
 def model_predict(
     model: nn.Module,
     encoders: Dict[str, LabelEncoder],
     y_enc: LabelEncoder,
     cat_cols: List[str],
+    num_cols: List[str],
     balls: int,
     strikes: int,
+    runners_count: int,
+    outs: int,
     feat: Dict[str, str],
     device: torch.device,
 ) -> Dict[str, float]:
-    # numeric scaling matches training
-    x_num = np.array([[balls / 3.0, strikes / 2.0]], dtype=np.float32)
+    # numeric scaling matches training, ordered by num_cols from the saved model
+    x_num = build_num_row(
+        num_cols=num_cols,
+        balls=balls,
+        strikes=strikes,
+        runners_count=runners_count,
+        outs=outs,
+    )
     x_num_t = torch.tensor(x_num, dtype=torch.float32, device=device)
 
     x_cat = [encoders[c].encode_one(feat[c]) for c in cat_cols]
@@ -336,6 +465,7 @@ def model_predict(
     with torch.no_grad():
         logits = model(x_cat_t, x_num_t)
         probs = torch.softmax(logits, dim=1).cpu().numpy()[0]
+
     return probs_to_dict(probs, y_enc)
 
 
@@ -358,6 +488,7 @@ def beam_search(
     encoders: Dict[str, LabelEncoder],
     y_enc: LabelEncoder,
     cat_cols: List[str],
+    num_cols: List[str],
     pitcher: int,
     batter: int,
     stand: str,
@@ -370,6 +501,11 @@ def beam_search(
     beam_width: int,
     device: torch.device,
     data_path: Optional[str] = None,
+    inning_bucket_value: str = "early",
+    base_state_value: str = "---",
+    runners_count_value: int = 0,
+    tto_bucket_value: str = "1",
+    outs_value: int = 0,
 ) -> List[BeamState]:
     if "pitch_action" not in encoders:
         raise KeyError("Missing 'pitch_action' in encoders; retrain with pitch_action.")
@@ -423,6 +559,10 @@ def beam_search(
                         "prev_action_1": b.prev1,
                         "prev_action_2": b.prev2,
                         "pitch_action": action,
+
+                        "inning_bucket": inning_bucket_value,
+                        "base_state": base_state_value,
+                        "tto_bucket": tto_bucket_value,
                     }
 
                     pm = model_predict(
@@ -430,10 +570,13 @@ def beam_search(
                         encoders=encoders,
                         y_enc=y_enc,
                         cat_cols=cat_cols,
+                        num_cols=num_cols,
                         balls=cb,
                         strikes=cs,
                         feat=feat,
                         device=device,
+                        runners_count=runners_count_value,
+                        outs=outs_value,
                     )
 
                     step_score_exp += w * score_objective(pm, cb, cs)
@@ -445,9 +588,9 @@ def beam_search(
 
                 next_dist = normalize_dist(next_dist_accum)
 
-                # Restore original-style repeat penalty (scaled by risky counts)
-                step_score_exp -= repeat_penalty_original_style(b.prev1, b.prev2, action, b.count_dist)
-                #ALternating pitch penalty, porevent ABABABABAB
+                # repeat pitch penalty 
+                step_score_exp -= repeat_penalty(b.prev1, b.prev2, action, b.count_dist)
+                # alternating pitch penalty, prevent ABABABABAB
                 step_score_exp -= alternation_penalty(b.prev1, b.prev2, action, b.count_dist)
                 # walk penalty
                 step_score_exp -= count_risk_penalty_from_dist(next_dist)
@@ -455,7 +598,7 @@ def beam_search(
                 
 
 
-                # Early stop if terminal is likely (keep, but can be tuned)
+                # Early stop if terminal is likely
                 done = b.done
                 if p_term_exp >= 0.60:
                     done = False # make sure early stop never actually happens
@@ -464,7 +607,7 @@ def beam_search(
                 eb0, es0 = expected_count(b.count_dist)
                 eb1, es1 = expected_count(next_dist)
 
-                # "Why" fields: show probs at MAP count (most likely count state)
+                # show most likely count state
                 (map_b, map_s) = max(b.count_dist.items(), key=lambda kv: kv[1])[0]
                 feat_map = {
                     "pitcher": str(pitcher),
@@ -474,16 +617,22 @@ def beam_search(
                     "prev_action_1": b.prev1,
                     "prev_action_2": b.prev2,
                     "pitch_action": action,
+                    "inning_bucket": inning_bucket_value,
+                    "base_state": base_state_value,
+                    "tto_bucket": tto_bucket_value,
                 }
                 pm_map = model_predict(
                     model=model,
                     encoders=encoders,
                     y_enc=y_enc,
                     cat_cols=cat_cols,
-                    balls=map_b,
-                    strikes=map_s,
-                    feat=feat_map,
+                    num_cols=num_cols,
+                    balls=cb,
+                    strikes=cs,
+                    feat=feat,
                     device=device,
+                    runners_count=runners_count_value,
+                    outs=outs_value,
                 )
 
                 step_obj = {
@@ -529,28 +678,50 @@ def main():
     parser = argparse.ArgumentParser(
         description="Recommend a pitch_action sequence using beam search (stochastic count distribution)."
     )
-    parser.add_argument("--modeldir", default="models/pitchsense_outcomes_v0")
-    parser.add_argument("--data", default=None, help="Optional parquet path used to infer pitcher arsenal")
-    #Requiring both pitcher and batter for now, this will probably change in the future to only require one or the other
+
+    #Get training model and data to infer pitcher arsenal
+    parser.add_argument("--modeldir", default="models/Test_v5")
+    parser.add_argument("--data", default="data/processed/outcomes_v2.parquet", help="Optional parquet path used to infer pitcher arsenal")
+
+    #Requiring both pitcher and batter for now, this will probably change in the future to only require pitcher
     parser.add_argument("--pitcher", required=True, type=int) #Ptcher and Batter are type int because it the input is the players MLBAM ID number not their name
     parser.add_argument("--batter", required=True, type=int)
 
+    #pitcher and batter stance, these might unnecesary, and switch hitter/pitcher may affect data but I dont think they are common enough for that to actually happen
     parser.add_argument("--stand", required=True, choices=["L", "R"])
     parser.add_argument("--p_throws", required=True, choices=["L", "R"])
-    parser.add_argument("--balls", required=True, type=int)
-    parser.add_argument("--strikes", required=True, type=int)
-    parser.add_argument("--prev1", default="NONE")
+
+    #Current count and previous pitches thrown up to 2 previous pitches
+    parser.add_argument("--balls", required=True, type=int, choices=[0, 1, 2, 3])
+    parser.add_argument("--strikes", required=True, type=int, choices=[0, 1, 2])
+    parser.add_argument("--prev1", default="NONE") #Pitch action format FF|Z1  (Fastball| Zone 1)
     parser.add_argument("--prev2", default="NONE")
-    parser.add_argument("--depth", type=int, default=4)
-    parser.add_argument("--beam_width", type=int, default=10)
+
+    #How many pitcher should be recommended and how many sequences should be recommended
+    parser.add_argument("--depth", type=int, default=4) #how many pitches, anything past 4 pitches will be pretty uselles I think
+    parser.add_argument("--beam_width", type=int, default=1) #how many sequences
+
+    #How many sequences should be explained
     parser.add_argument("--topk", type=int, default=5)
     parser.add_argument("--json", action="store_true")
+
+    #Current Inning, putcher times through order, and runners on base
+    parser.add_argument("--inning", type=int, default=None, help="Current Inning")
+    parser.add_argument("--tto", type=int, default=None, help="Time Through Order 1-4, where 4 will be treated as 4+") #How many times has the pitcher pitched through order, have they pitched to the same batter multiple times 
+
+    #Runners on base
+    parser.add_argument("--on_1b", action="store_true", help="Runner on 1st")
+    parser.add_argument("--on_2b", action="store_true", help="Runner on 2nd")
+    parser.add_argument("--on_3b", action="store_true", help="Runner on 3rd")
     #parser.add_argument("--gamma", type=float, default=0.90)
 
 
     # Restored explain flags
     parser.add_argument("--explain", action="store_true", help="Print extra per-step probability explanations")
     parser.add_argument("--explain_top", type=int, default=3, help="How many top sequences to explain")
+
+    # How many outs are there currently
+    parser.add_argument("--outs", type=int, default=0, choices=[0, 1, 2], help="Outs in inning (0-2)")
 
     args = parser.parse_args()
 
@@ -560,11 +731,19 @@ def main():
     prev1 = normalize_prev_action(args.prev1)
     prev2 = normalize_prev_action(args.prev2)
 
+    ib = inning_bucket(args.inning)
+    
+    bs = base_state(args.on_1b, args.on_2b, args.on_3b)
+    #is_risp = risp(args.on_2b, args.on_3b)
+    rc = int(args.on_1b) + int(args.on_2b) + int(args.on_3b)  # 0..3
+    tb = tto_bucket(args.tto)
+
     beams = beam_search(
         model=model,
         encoders=encoders,
         y_enc=y_enc,
         cat_cols=cat_cols,
+        num_cols=num_cols,
         pitcher=args.pitcher,
         batter=args.batter,
         stand=args.stand,
@@ -577,7 +756,14 @@ def main():
         beam_width=args.beam_width,
         device=device,
         data_path=args.data,
+        inning_bucket_value=ib,
+        base_state_value=bs,
+        runners_count_value=rc,
+        tto_bucket_value=tb,
+        outs_value=args.outs,
     )
+
+   
 
     out = {
         "mode": "sequence",
@@ -590,6 +776,17 @@ def main():
             "strikes": args.strikes,
             "prev_action_1": prev1,
             "prev_action_2": prev2,
+
+            # baserunners, TTO
+            "inning": args.inning,
+            "inning_bucket": ib,
+            "times_through_order": args.tto,
+            "tto_bucket": tb,
+            "runners": {"on_1b": args.on_1b, "on_2b": args.on_2b, "on_3b": args.on_3b},
+            "base_state": bs,
+            "runners_count": rc,
+            "outs": args.outs,
+            #"risp": is_risp,
         },
         "params": {"depth": args.depth, "beam_width": args.beam_width},
         "sequences": [],
@@ -645,7 +842,7 @@ def main():
             )
         print()
 
-    # Restored "explain" output (original-style)
+    # Explanation for pitch sequence, basically just stats
     if args.explain and out["sequences"]:
         n = max(1, min(args.explain_top, len(out["sequences"])))
         print("\n--- Explanation (top sequences) ---")

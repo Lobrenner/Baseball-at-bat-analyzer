@@ -105,15 +105,26 @@ def main():
     print("[OUTCOME COUNTS]\n", df["outcome"].value_counts().head(12))
 
     # Categorical features (state + action)
-    cat_cols = ["pitcher", "batter", "stand", "p_throws", "prev_action_1", "prev_action_2", "pitch_action"]
+    cat_cols = [
+        "pitcher",
+        "batter",
+        "stand",
+        "p_throws",
+        "inning_bucket",
+        "base_state",
+        "prev_action_1",
+        "prev_action_2",
+        "pitch_action",
+        "tto_bucket",  
+    ]
     # Numeric features
-    num_cols = ["balls", "strikes"]
+    num_cols = ["balls", "strikes", "runners_count", "outs"]
     target_col = "outcome"
 
     train_df, val_df = split_train_val(df, val_frac=args.val_frac, seed=args.seed)
     print("[SPLIT] train=", train_df.shape, "val=", val_df.shape)
 
-    # Key idea: fit encoders only on train split
+    # fit encoders only on train split
     encoders: Dict[str, LabelEncoder] = {c: LabelEncoder.fit(train_df[c]) for c in cat_cols}
     y_enc = LabelEncoder.fit(train_df[target_col])
 
@@ -126,8 +137,13 @@ def main():
     # Simple scaling (keeps values small and stable)
     X_train_num[:, 0] /= 3.0  # balls
     X_train_num[:, 1] /= 2.0  # strikes
+    X_train_num[:, 2] /= 3.0  # runners_count
+    X_train_num[:, 3] /= 2.0  # outs
+
     X_val_num[:, 0] /= 3.0
     X_val_num[:, 1] /= 2.0
+    X_val_num[:, 2] /= 3.0
+    X_val_num[:, 3] /= 2.0 
 
     y_train = y_enc.transform(train_df[target_col])
     y_val = y_enc.transform(val_df[target_col])
