@@ -144,15 +144,18 @@ def inning_bucket(inning: Optional[int]) -> str:
     return "extras"
 
 #
-#def tto_bucket(tto: Optional[int]) -> str:
-    # neutral-ish default; you can pick "2" or "1"—I recommend "2"
- #   if tto is None:
- #       return "1"
- #   if tto <= 1:
- #       return "1"
- #   if tto == 2:
- #       return "2" 
- #   return "3+"  # covers 3 and 4+, Pitcher literally never go through an order more than three times but migth as well include it 
+def tto_bucket(n):
+    try:
+        val = int(n)
+    except Exception:
+        return "1"   # safe default
+
+    if val == 1:
+        return "1"   # first time through
+    if val == 2:
+        return "2"   # second time
+    return "3+"      # third or more
+
 
 def base_state(on_1b: bool, on_2b: bool, on_3b: bool) -> str:
     return f"{'1' if on_1b else '-'}{'2' if on_2b else '-'}{'3' if on_3b else '-'}"
@@ -160,6 +163,66 @@ def base_state(on_1b: bool, on_2b: bool, on_3b: bool) -> str:
 #Runners in scoring position
 #def risp(on_2b: bool, on_3b: bool) -> bool:
 #    return bool(on_2b or on_3b)
+
+def recommend_from_raw_state(
+    *,
+    model: nn.Module,
+    encoders: Dict[str, LabelEncoder],
+    y_enc: LabelEncoder,
+    cat_cols: List[str],
+    num_cols: List[str],
+    device: torch.device,
+    data_path: Optional[str],
+    pitcher: int,
+    batter: int,
+    stand: str,
+    p_throws: str,
+    balls: int,
+    strikes: int,
+    prev1: str,
+    prev2: str,
+    outs: int = 0,
+    on_1b: int = 0,
+    on_2b: int = 0,
+    on_3b: int = 0,
+    inning: Optional[int] = None,
+    tto: Optional[int] = None,
+    depth: int = 4,
+    beam_width: int = 8,
+):
+    # derive features using YOUR canonical logic
+    ib = inning_bucket(inning)
+    tb = tto_bucket(tto)
+    bs = base_state(bool(on_1b), bool(on_2b), bool(on_3b))
+    rc = int(bool(on_1b)) + int(bool(on_2b)) + int(bool(on_3b))
+
+    prev1 = normalize_prev_action(prev1)
+    prev2 = normalize_prev_action(prev2)
+
+    return beam_search(
+        model=model,
+        encoders=encoders,
+        y_enc=y_enc,
+        cat_cols=cat_cols,
+        num_cols=num_cols,
+        pitcher=pitcher,
+        batter=batter,
+        stand=stand,
+        p_throws=p_throws,
+        balls=balls,
+        strikes=strikes,
+        prev1=prev1,
+        prev2=prev2,
+        depth=depth,
+        beam_width=beam_width,
+        device=device,
+        data_path=data_path,
+        inning_bucket_value=ib,
+        base_state_value=bs,
+        runners_count_value=rc,
+        tto_bucket_value=tb,
+        outs_value=outs,
+    )
 
 
 def normalize_prev_action(s: str) -> str:
@@ -356,20 +419,44 @@ def alternation_penalty(
     return 0.0
 
 
+def build_num_row(num_cols, balls, strikes, runners_count, outs):
+    row = []
+    for c in num_cols:
+        if c == "balls":
+            row.append(balls / 3.0)
+        elif c == "strikes":
+            row.append(strikes / 2.0)
+        elif c == "runners_count":
+            row.append(runners_count / 3.0)
+        elif c == "outs":
+            row.append(outs / 2.0)
+        else:
+            # unknown numeric feature in saved model; safest default
+            row.append(0.0)
+    return np.array([row], dtype=np.float32)
+
 # create probability map (pm) for pitch outcomes 
 def model_predict(
     model: nn.Module,
     encoders: Dict[str, LabelEncoder],
     y_enc: LabelEncoder,
     cat_cols: List[str],
+    num_cols: List[str],
     balls: int,
     strikes: int,
     runners_count: int,
+    outs: int,
     feat: Dict[str, str],
     device: torch.device,
 ) -> Dict[str, float]:
-    # numeric scaling matches training
-    x_num = np.array([[balls / 3.0, strikes / 2.0, runners_count / 3.0]], dtype=np.float32)
+    # numeric scaling matches training, ordered by num_cols from the saved model
+    x_num = build_num_row(
+        num_cols=num_cols,
+        balls=balls,
+        strikes=strikes,
+        runners_count=runners_count,
+        outs=outs,
+    )
     x_num_t = torch.tensor(x_num, dtype=torch.float32, device=device)
 
     x_cat = [encoders[c].encode_one(feat[c]) for c in cat_cols]
@@ -378,6 +465,7 @@ def model_predict(
     with torch.no_grad():
         logits = model(x_cat_t, x_num_t)
         probs = torch.softmax(logits, dim=1).cpu().numpy()[0]
+
     return probs_to_dict(probs, y_enc)
 
 
@@ -400,6 +488,7 @@ def beam_search(
     encoders: Dict[str, LabelEncoder],
     y_enc: LabelEncoder,
     cat_cols: List[str],
+    num_cols: List[str],
     pitcher: int,
     batter: int,
     stand: str,
@@ -415,6 +504,8 @@ def beam_search(
     inning_bucket_value: str = "early",
     base_state_value: str = "---",
     runners_count_value: int = 0,
+    tto_bucket_value: str = "1",
+    outs_value: int = 0,
 ) -> List[BeamState]:
     if "pitch_action" not in encoders:
         raise KeyError("Missing 'pitch_action' in encoders; retrain with pitch_action.")
@@ -471,6 +562,7 @@ def beam_search(
 
                         "inning_bucket": inning_bucket_value,
                         "base_state": base_state_value,
+                        "tto_bucket": tto_bucket_value,
                     }
 
                     pm = model_predict(
@@ -478,11 +570,13 @@ def beam_search(
                         encoders=encoders,
                         y_enc=y_enc,
                         cat_cols=cat_cols,
+                        num_cols=num_cols,
                         balls=cb,
                         strikes=cs,
                         feat=feat,
                         device=device,
                         runners_count=runners_count_value,
+                        outs=outs_value,
                     )
 
                     step_score_exp += w * score_objective(pm, cb, cs)
@@ -525,17 +619,20 @@ def beam_search(
                     "pitch_action": action,
                     "inning_bucket": inning_bucket_value,
                     "base_state": base_state_value,
+                    "tto_bucket": tto_bucket_value,
                 }
                 pm_map = model_predict(
                     model=model,
                     encoders=encoders,
                     y_enc=y_enc,
                     cat_cols=cat_cols,
-                    balls=map_b,
-                    strikes=map_s,
-                    feat=feat_map,
+                    num_cols=num_cols,
+                    balls=cb,
+                    strikes=cs,
+                    feat=feat,
                     device=device,
                     runners_count=runners_count_value,
+                    outs=outs_value,
                 )
 
                 step_obj = {
@@ -584,7 +681,7 @@ def main():
 
     #Get training model and data to infer pitcher arsenal
     parser.add_argument("--modeldir", default="models/Test_v5")
-    parser.add_argument("--data", default="data/Test/big_data.parquet", help="Optional parquet path used to infer pitcher arsenal")
+    parser.add_argument("--data", default="data/processed/outcomes_v2.parquet", help="Optional parquet path used to infer pitcher arsenal")
 
     #Requiring both pitcher and batter for now, this will probably change in the future to only require pitcher
     parser.add_argument("--pitcher", required=True, type=int) #Ptcher and Batter are type int because it the input is the players MLBAM ID number not their name
@@ -623,6 +720,9 @@ def main():
     parser.add_argument("--explain", action="store_true", help="Print extra per-step probability explanations")
     parser.add_argument("--explain_top", type=int, default=3, help="How many top sequences to explain")
 
+    # How many outs are there currently
+    parser.add_argument("--outs", type=int, default=0, choices=[0, 1, 2], help="Outs in inning (0-2)")
+
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -632,16 +732,18 @@ def main():
     prev2 = normalize_prev_action(args.prev2)
 
     ib = inning_bucket(args.inning)
-    # tb = tto_bucket(args.tto)
+    
     bs = base_state(args.on_1b, args.on_2b, args.on_3b)
     #is_risp = risp(args.on_2b, args.on_3b)
     rc = int(args.on_1b) + int(args.on_2b) + int(args.on_3b)  # 0..3
+    tb = tto_bucket(args.tto)
 
     beams = beam_search(
         model=model,
         encoders=encoders,
         y_enc=y_enc,
         cat_cols=cat_cols,
+        num_cols=num_cols,
         pitcher=args.pitcher,
         batter=args.batter,
         stand=args.stand,
@@ -656,7 +758,9 @@ def main():
         data_path=args.data,
         inning_bucket_value=ib,
         base_state_value=bs,
-        runners_count_value=rc
+        runners_count_value=rc,
+        tto_bucket_value=tb,
+        outs_value=args.outs,
     )
 
    
@@ -677,6 +781,11 @@ def main():
             "inning": args.inning,
             "inning_bucket": ib,
             "times_through_order": args.tto,
+            "tto_bucket": tb,
+            "runners": {"on_1b": args.on_1b, "on_2b": args.on_2b, "on_3b": args.on_3b},
+            "base_state": bs,
+            "runners_count": rc,
+            "outs": args.outs,
             #"risp": is_risp,
         },
         "params": {"depth": args.depth, "beam_width": args.beam_width},

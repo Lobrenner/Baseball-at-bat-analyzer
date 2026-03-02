@@ -26,8 +26,10 @@ KEEP_COLS = [
     "on_1b",
     "on_2b",
     "on_3b",
+    "n_thruorder_pitcher",
 ]
 
+OPTIONAL_COLS = ["outs_when_up"] #optional because sometimes not present in data and don't want to skip whole files
 
 # Outcome mapping helpers
 HIT_EVENTS = {"single", "double", "triple", "home_run"}
@@ -77,7 +79,8 @@ def load_parquets(indir: str) -> pd.DataFrame:
             skipped += 1
             continue
 
-        dfs.append(df0[KEEP_COLS])
+        cols = KEEP_COLS + [c for c in OPTIONAL_COLS if c in df0.columns]
+        dfs.append(df0[cols])
 
     if not dfs:
         raise RuntimeError(f"All parquet files were empty/bad in: {indir}")
@@ -163,6 +166,20 @@ def main():
 
     df["inning_bucket"] = df["inning"].apply(map_inning_bucket)
 
+    def map_tto_bucket(n) -> str:
+    # 1=1st time thru order, 2=2nd, 3=3rd, ... never has 0th time thru order
+        try:
+            val = int(n)
+        except Exception:
+            return "1"  # safe default
+
+        if val <= 1:
+            return "1"
+        if val == 2:
+            return "2"
+        return "3+"
+
+    df["tto_bucket"] = df["n_thruorder_pitcher"].apply(map_tto_bucket)
 
     df["on_1b_bool"] = df["on_1b"].notna()
     df["on_2b_bool"] = df["on_2b"].notna()
@@ -174,13 +191,13 @@ def main():
         + df["on_3b_bool"].map({True: "3", False: "-"})
     )
 
-    df["runners_count"] = df[["on_1b_bool","on_2b_bool","on_3b_bool"]].sum(axis=1)
+    df["runners_count"] = df[["on_1b_bool","on_2b_bool","on_3b_bool"]].sum(axis=1).astype(int)
 
     #add number labeled pitch zone
     df["zone"] = pd.to_numeric(df["zone"], errors = "coerce")
 
     #location, this takes the zone stat from raw dataset and makes location. 
-    #strikezone includes 1-9 so we are omitting 11-14 (10 doesn't exist) because they are balls and could be bad pitches, probably should include them later though when the model is better for pitch tunneling
+    #strikezone includes 1-9 so we are omitting 11-14 (10 doesn't exist ig) because they are balls and could be bad pitches, probably should include them later though when the model is better for pitch tunneling
     df["loc_bucket"] = df["zone"].apply(
         lambda z: f"Z{int(z)}" if pd.notna(z) and 1 <= z <= 9 else "OZ" #OZ = outzone aka ball or unrecorded
     )
@@ -195,6 +212,14 @@ def main():
     df["outcome"] = df.apply(label_outcome, axis=1)
     df["outcome"] = df["outcome"].replace({"OTHER_PITCH": "OTHER", "OTHER_EVENT": "OTHER"})
 
+    #turn outs_when_up into just outs
+    if "outs_when_up" in df.columns:
+        df["outs"] = pd.to_numeric(df["outs_when_up"], errors="coerce").fillna(0).astype(int)
+    else:
+        print("[WARN] outs_when_up not found; setting outs=0 for all rows (model won't learn outs).")
+        df["outs"] = 0
+
+    df["outs"] = df["outs"].clip(0, 2)
     # Keep a modeling-friendly subset
     out_cols = [
         "pitcher",
@@ -210,6 +235,8 @@ def main():
         "inning_bucket",
         "base_state",
         "runners_count",
+        "tto_bucket",  
+        "outs"
     ]
     out_df = df[out_cols].copy()
 
