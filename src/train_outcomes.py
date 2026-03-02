@@ -105,15 +105,25 @@ def main():
     print("[OUTCOME COUNTS]\n", df["outcome"].value_counts().head(12))
 
     # Categorical features (state + action)
-    cat_cols = ["pitcher", "batter", "stand", "p_throws", "prev_action_1", "prev_action_2", "pitch_action"]
+    cat_cols = [
+        "pitcher",
+        "batter",
+        "stand",
+        "p_throws",
+        "inning_bucket",
+        "base_state",
+        "prev_action_1",
+        "prev_action_2",
+        "pitch_action",
+    ]
     # Numeric features
-    num_cols = ["balls", "strikes"]
+    num_cols = ["balls", "strikes", "runners_count"]
     target_col = "outcome"
 
     train_df, val_df = split_train_val(df, val_frac=args.val_frac, seed=args.seed)
     print("[SPLIT] train=", train_df.shape, "val=", val_df.shape)
 
-    # Key idea: fit encoders only on train split
+    # fit encoders only on train split
     encoders: Dict[str, LabelEncoder] = {c: LabelEncoder.fit(train_df[c]) for c in cat_cols}
     y_enc = LabelEncoder.fit(train_df[target_col])
 

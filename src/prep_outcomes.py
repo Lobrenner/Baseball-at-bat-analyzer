@@ -22,6 +22,10 @@ KEEP_COLS = [
     "description",
     "events", #what happened after that pitch
     "zone", # pitch location
+    "inning",
+    "on_1b",
+    "on_2b",
+    "on_3b",
 ]
 
 
@@ -144,6 +148,34 @@ def main():
     df = df.dropna(subset=["pitch_type", "balls", "strikes", "stand", "p_throws"])
     print("[CLEAN]", df.shape)
 
+    def map_inning_bucket(inning: float | int) -> str:
+        try:
+            inn = int(inning)
+        except Exception:
+            return "early"  # default to early if there is something weird
+        if inn <= 3:
+            return "early"
+        if inn <= 6:
+            return "mid"
+        if inn <= 9:
+            return "late"
+        return "extras"
+
+    df["inning_bucket"] = df["inning"].apply(map_inning_bucket)
+
+
+    df["on_1b_bool"] = df["on_1b"].notna()
+    df["on_2b_bool"] = df["on_2b"].notna()
+    df["on_3b_bool"] = df["on_3b"].notna()
+
+    df["base_state"] = (
+        df["on_1b_bool"].map({True: "1", False: "-"})
+        + df["on_2b_bool"].map({True: "2", False: "-"})
+        + df["on_3b_bool"].map({True: "3", False: "-"})
+    )
+
+    df["runners_count"] = df[["on_1b_bool","on_2b_bool","on_3b_bool"]].sum(axis=1)
+
     #add number labeled pitch zone
     df["zone"] = pd.to_numeric(df["zone"], errors = "coerce")
 
@@ -174,7 +206,10 @@ def main():
         "prev_action_1",   #previous pitch
         "prev_action_2",   #two pitches prior
         "pitch_action",   #this is the "action" we choose
-        "outcome",      # what happened after choosing it 
+        "outcome",      # what was the result of pitch being thrown
+        "inning_bucket",
+        "base_state",
+        "runners_count",
     ]
     out_df = df[out_cols].copy()
 
