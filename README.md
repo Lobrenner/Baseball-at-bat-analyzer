@@ -55,15 +55,17 @@ python src/download.py --start 2024-06-01 --end 2024-06-07
 
 Cleans raw data, normalizes outcomes, and prepares features for training.
 
-python src/prep_outcomes.py --out data/processed/pitchsense_outcomes_pitcher_v1.parquet
+python src/prep_outcomes.py --indir data/raw --out data/processed/pitchsense_outcomes_v1.parquet
 
 
 3. Train Outcome Model (train_outcomes.py)
 
 Trains a PyTorch classification model that predicts pitch outcomes given context.
 
-python src/train_outcomes.py --data data/processed/pitchsense_outcomes_pitcher_v1.parquet --outdir models/pitchsense_outcomes_pitcher_v1 --epochs 8
-
+python src/train_outcomes.py `
+  --data data/processed/pitchsense_outcomes_v1.parquet `
+  --outdir models/Test_v6 `
+  --epochs 6
 
 Outputs:
 
@@ -76,18 +78,17 @@ models/pitchsense_outcomes_pitcher_v1/
 
 Uses beam search to recommend a sequence of pitches optimized for pitcher success.
 
-python src\recommend_sequence.py `
-  --modeldir models\pitchsense_outcomes_pitcher_v1 `
-  --data data\processed\pitchsense_outcomes_pitcher_v1.parquet `
+python src/recommend_sequence.py `
+  --modeldir models/Test_v6 `
   --pitcher 669373 `
+  --batter 669257 `
   --stand L `
-  --p_throws L `
-  --balls 0 `
+  --p_throws R `
+  --balls 1 `
   --strikes 2 `
-  --prev1 FF `
-  --prev2 SL `
-  --beam_width 5 `
-  --depth 3
+  --inning 4 `
+  --on_1b `
+  --on_3b `
 
 
 Modeling Approach
@@ -108,13 +109,13 @@ Modeling Approach
 
 Planned Extensions
 
-- Pitch location modeling (zone buckets)
+- Pitch location modeling (zone buckets) #complete
 
-- Batter-specific matchups
+- Batter-specific matchups #complete
 
 - Maybe add three general classifications of a batter (Aggressive, Mix, passive) so a sequence is generated for a specific archetype
 
-- Larger training data set
+- Larger training data set #complete kinda, could still be bigger
 
 - Implement "stuff-awareness" (some pitchers may have better pitches than others even if they throw the same pitch type). Model should understand understand when a pitcher has a specific unique/dominant pitch that would be more effective than if it came form a different pitcher
 
