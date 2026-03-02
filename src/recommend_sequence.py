@@ -369,7 +369,7 @@ def pitch_type_of(action_or_prev: str) -> str:
     return action_or_prev.split("|", 1)[0]
 
 
-def repeat_penalty_original_style( #asked chat to do this to and it sucked again, but whatever ill clean it up later
+def repeat_penalty( 
     prev1: str,
     prev2: str,
     action: str,
@@ -589,7 +589,7 @@ def beam_search(
                 next_dist = normalize_dist(next_dist_accum)
 
                 # repeat pitch penalty 
-                step_score_exp -= repeat_penalty_original_style(b.prev1, b.prev2, action, b.count_dist)
+                step_score_exp -= repeat_penalty(b.prev1, b.prev2, action, b.count_dist)
                 # alternating pitch penalty, prevent ABABABABAB
                 step_score_exp -= alternation_penalty(b.prev1, b.prev2, action, b.count_dist)
                 # walk penalty
