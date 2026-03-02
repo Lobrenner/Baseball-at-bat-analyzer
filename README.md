@@ -55,17 +55,14 @@ python src/download.py --start 2024-06-01 --end 2024-06-07
 
 Cleans raw data, normalizes outcomes, and prepares features for training.
 
-python src/prep_outcomes.py --indir data/raw --out data/processed/pitchsense_outcomes_v1.parquet
+python src/prep_outcomes.py --indir data/raw --out data/processed/outcomes_with_outs.parquet
 
 
 3. Train Outcome Model (train_outcomes.py)
 
 Trains a PyTorch classification model that predicts pitch outcomes given context.
 
-python src/train_outcomes.py `
-  --data data/processed/pitchsense_outcomes_v1.parquet `
-  --outdir models/Test_v6 `
-  --epochs 6
+python src/train_outcomes.py --data data/processed/outcomes_with_outs.parquet --outdir models/Test_v9_outs
 
 Outputs:
 
@@ -79,16 +76,21 @@ models/pitchsense_outcomes_pitcher_v1/
 Uses beam search to recommend a sequence of pitches optimized for pitcher success.
 
 python src/recommend_sequence.py `
-  --modeldir models/Test_v6 `
+  --modeldir models/Test_v9_outs `
+  --data data/processed/outcomes_with_outs.parquet `
   --pitcher 669373 `
   --batter 669257 `
-  --stand L `
-  --p_throws R `
+  --stand R `
+  --p_throws L `
   --balls 1 `
   --strikes 2 `
+  --outs 2 `
   --inning 4 `
+  --tto 3 `
   --on_1b `
-  --on_3b `
+  --beam_width 8 `
+  --depth 4 `
+  --json
 
 
 Modeling Approach
