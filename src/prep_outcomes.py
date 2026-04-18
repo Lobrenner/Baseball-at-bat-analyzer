@@ -198,8 +198,10 @@ def main():
 
     #location, this takes the zone stat from raw dataset and makes location. 
     #strikezone includes 1-9 so we are omitting 11-14 (10 doesn't exist ig) because they are balls and could be bad pitches, probably should include them later though when the model is better for pitch tunneling
+    VALID_ZONES = {1,2,3,4,5,6,7,8,9,11,12,13,14}
+
     df["loc_bucket"] = df["zone"].apply(
-        lambda z: f"Z{int(z)}" if pd.notna(z) and 1 <= z <= 9 else "OZ" #OZ = outzone aka ball or unrecorded
+        lambda z: f"Z{int(z)}" if pd.notna(z) and int(z) in VALID_ZONES else "UNK_LOC"
     )
 
     df["pitch_action"] = df["pitch_type"] + "|" + df["loc_bucket"] #makes a colum that describes a pitch with its type and location ex. FF|Z1 this would be a fastball top left of the zone
@@ -222,6 +224,8 @@ def main():
     df["outs"] = df["outs"].clip(0, 2)
     # Keep a modeling-friendly subset
     out_cols = [
+        "game_pk",
+        "at_bat_number",
         "pitcher",
         "batter",
         "stand",

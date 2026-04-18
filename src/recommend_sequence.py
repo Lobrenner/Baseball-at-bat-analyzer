@@ -83,11 +83,19 @@ def load_model(modeldir: str, device: torch.device):
 
     y_enc = LabelEncoder.from_classes(payload["target_encoder"]["classes"])
 
+    emb_dim = ckpt.get("emb_dim", 16)
+    hidden_dim = ckpt.get("hidden_dim", 128)
+    dropout = ckpt.get("dropout", 0.1)
+
     model = OutcomeMLP(
         cat_sizes=ckpt["cat_sizes"],
         num_numeric=len(num_cols),
         num_classes=ckpt["num_classes"],
+        emb_dim=emb_dim,
+        hidden_dim=hidden_dim,
+        dropout=dropout,
     ).to(device)
+
     model.load_state_dict(ckpt["state_dict"])
     model.eval()
 
@@ -150,7 +158,7 @@ def tto_bucket(n):
     except Exception:
         return "1"   # safe default
 
-    if val == 1:
+    if val <= 1:
         return "1"   # first time through
     if val == 2:
         return "2"   # second time
@@ -231,7 +239,7 @@ def normalize_prev_action(s: str) -> str:
         return "NONE"
     if "|" in s:
         return s
-    return f"{s}|OZ"
+    return f"{s}|UNK_LOC"
 
 
 def split_action(action: str) -> Tuple[str, str]:
@@ -248,34 +256,51 @@ def probs_to_dict(probs: np.ndarray, y_enc: LabelEncoder) -> Dict[str, float]:
 
 
 def score_objective(pm: Dict[str, float], balls: int, strikes: int) -> float:
-    """
-    make a score for each pitch chosen, can be adjusted later
-    scores are relative only to other pitches in sequence
-    """
+    p_k = pm.get("K", 0.0)
+    p_bip = pm.get("BIP_OUT", 0.0)
+    p_bb = pm.get("BB", 0.0)
+    p_hit = pm.get("HIT", 0.0)
+
+    # Make walk penalty harsher in hitter's counts
+    if balls <= 1:
+        bb_w = 0.70
+    elif balls == 2:
+        bb_w = 0.95
+    else:  # balls == 3
+        bb_w = 1.30
+
+
     base = (
-        1.0 * pm.get("K", 0.0)
-        + 0.35 * pm.get("BIP_OUT", 0.0)
-        - 0.70 * pm.get("BB", 0.0)
-        - 1.20 * pm.get("HIT", 0.0)
+        1.0 * p_k
+        + 0.35 * p_bip
+        - bb_w * p_bb
+        - 1.20 * p_hit
     )
 
     p_ball = pm.get("BALL", 0.0)
     p_strike = pm.get("STRIKE", 0.0)
     p_foul = pm.get("FOUL", 0.0)
 
-    # Strikes are more valuable early to get ahead in the count
     if strikes == 0:
         strike_w = 0.10
     elif strikes == 1:
         strike_w = 0.06
-    else:  # strikes == 2
+    else:
         strike_w = 0.02
 
-    # Fouls only add strike value when strikes < 2
+    if balls == 3:
+        strike_w += 0.12
+
     foul_w = 0.06 if strikes < 2 else 0.0
 
-    # Balls are mildly bad; more bad when you're already at 2+ balls
-    ball_w = 0.05 if balls < 2 else 0.10
+    if balls == 0:
+        ball_w = 0.05
+    elif balls == 1:
+        ball_w = 0.07
+    elif balls == 2:
+        ball_w = 0.12
+    else:
+        ball_w = 0.20
 
     shaped = base + strike_w * p_strike + foul_w * p_foul - ball_w * p_ball
     return shaped
@@ -368,6 +393,35 @@ def pitch_type_of(action_or_prev: str) -> str:
         return "NONE"
     return action_or_prev.split("|", 1)[0]
 
+def zone_of(action_or_prev: str) -> str:
+    if action_or_prev == "NONE":
+        return ""
+    parts = action_or_prev.split("|", 1)
+    return parts[1] if len(parts) == 2 else ""
+
+
+def zone_repeat_penalty(
+    prev1: str,
+    prev2: str,
+    action: str,
+    count_dist: Dict[Tuple[int, int], float],
+) -> float:
+    z = zone_of(action)
+    z1 = zone_of(prev1)
+    z2 = zone_of(prev2)
+
+    if not z:
+        return 0.0
+
+    _, es = expected_count(count_dist)
+    scale = 1.0 + 0.25 * min(es, 2.0)
+
+    pen = 0.0
+    if z == z1:
+        pen += 0.015 * scale
+    if z == z1 and z == z2:
+        pen += 0.05 * scale
+    return pen
 
 def repeat_penalty( 
     prev1: str,
@@ -392,10 +446,33 @@ def repeat_penalty(
 
     pen = 0.0
     if pitch == p1:
-        pen += 0.03 * scale
+        pen += 0.05 * scale
     if pitch == p1 and pitch == p2:
-        pen += 0.15 * scale
+        pen += 0.22 * scale
     return pen
+
+def pitch_type_frequency_penalty(seq: List[Dict[str, Any]], action: str) -> float:
+    """
+    Small penalty for reusing a pitch type anywhere earlier in the sequence.
+    This is weaker than the immediate repeat penalty.
+    """
+    pitch = pitch_type_of(action)
+
+    prev_pitch_types = [
+        pitch_type_of(step["pitch_action"])
+        for step in seq
+        if "pitch_action" in step
+    ]
+
+    repeats = sum(1 for p in prev_pitch_types if p == pitch)
+
+    if repeats == 0:
+        return 0.0
+    if repeats == 1:
+        return 0.01
+    if repeats == 2:
+        return 0.03
+    return 0.05
 
 def alternation_penalty(
     prev1: str,
@@ -415,25 +492,16 @@ def alternation_penalty(
     if p2 != "NONE" and a == p2 and a != p1:
         _, es = expected_count(count_dist)
         scale = 1.0 + 1.0 * min(es, 2.0)   # 0 strikes -> 1.0, 2 strikes -> 3.0
-        return 0.06 * scale                # base penalty
+        return 0.08 * scale                # base penalty
     return 0.0
 
-
-def build_num_row(num_cols, balls, strikes, runners_count, outs):
-    row = []
-    for c in num_cols:
-        if c == "balls":
-            row.append(balls / 3.0)
-        elif c == "strikes":
-            row.append(strikes / 2.0)
-        elif c == "runners_count":
-            row.append(runners_count / 3.0)
-        elif c == "outs":
-            row.append(outs / 2.0)
-        else:
-            # unknown numeric feature in saved model; safest default
-            row.append(0.0)
-    return np.array([row], dtype=np.float32)
+def exact_action_repeat_penalty(prev1: str, prev2: str, action: str) -> float:
+    pen = 0.0
+    if action == prev1:
+        pen += 0.03
+    if action == prev1 and action == prev2:
+        pen += 0.10
+    return pen
 
 # create probability map (pm) for pitch outcomes 
 def model_predict(
@@ -449,14 +517,14 @@ def model_predict(
     feat: Dict[str, str],
     device: torch.device,
 ) -> Dict[str, float]:
-    # numeric scaling matches training, ordered by num_cols from the saved model
-    x_num = build_num_row(
-        num_cols=num_cols,
-        balls=balls,
-        strikes=strikes,
-        runners_count=runners_count,
-        outs=outs,
-    )
+    num_map = {
+        "balls": balls / 3.0,
+        "strikes": strikes / 2.0,
+        "runners_count": runners_count / 3.0,
+        "outs": outs / 2.0,
+    }
+
+    x_num = np.array([[num_map[c] for c in num_cols]], dtype=np.float32)
     x_num_t = torch.tensor(x_num, dtype=torch.float32, device=device)
 
     x_cat = [encoders[c].encode_one(feat[c]) for c in cat_cols]
@@ -465,9 +533,7 @@ def model_predict(
     with torch.no_grad():
         logits = model(x_cat_t, x_num_t)
         probs = torch.softmax(logits, dim=1).cpu().numpy()[0]
-
     return probs_to_dict(probs, y_enc)
-
 
 # Beam search with stochastic counts
 
@@ -511,7 +577,10 @@ def beam_search(
         raise KeyError("Missing 'pitch_action' in encoders; retrain with pitch_action.")
 
     action_encoder = encoders["pitch_action"]
-    actions = [a for a in action_encoder.classes_ if a != "__UNK__"]
+    actions = [
+        a for a in action_encoder.classes_
+        if a != "__UNK__" and not a.endswith("|UNK_LOC")
+    ]
 
     # arsenal restriction 
     if data_path is not None:
@@ -594,9 +663,12 @@ def beam_search(
                 step_score_exp -= alternation_penalty(b.prev1, b.prev2, action, b.count_dist)
                 # walk penalty
                 step_score_exp -= count_risk_penalty_from_dist(next_dist)
-
-                
-
+                #Its good to throw to one part of the zone over and ever, but its kinda crazy top do that every single time so this is just a minor penalty
+                step_score_exp -= zone_repeat_penalty(b.prev1, b.prev2, action, b.count_dist)
+                #Extra penalty for same pitch and same location repetition
+                step_score_exp -= exact_action_repeat_penalty(b.prev1, b.prev2, action)
+                #Minor penalty for repeating the same pitch at any time in at bat, still allows it but it has be a good decision
+                step_score_exp -= pitch_type_frequency_penalty(b.seq, action)
 
                 # Early stop if terminal is likely
                 done = b.done
@@ -627,13 +699,13 @@ def beam_search(
                     y_enc=y_enc,
                     cat_cols=cat_cols,
                     num_cols=num_cols,
-                    balls=cb,
-                    strikes=cs,
-                    feat=feat,
+                    balls=map_b,
+                    strikes=map_s,
+                    feat=feat_map,
                     device=device,
                     runners_count=runners_count_value,
                     outs=outs_value,
-                )
+                    )
 
                 step_obj = {
                     "step": step,
@@ -673,6 +745,179 @@ def beam_search(
 
     return beams
 
+PITCH_DISPLAY_NAMES = {
+    "FF": "Fastball",
+    "SI": "Sinker",
+    "SL": "Slider",
+    "CU": "Curveball",
+    "CH": "Changeup",
+}
+
+
+def format_percent(x: float) -> str:
+    return f"{100.0 * x:.0f}%"
+
+
+def build_applied_scenario(req: Dict[str, Any]) -> str:
+    parts = [
+        f"{req['balls']}-{req['strikes']} count",
+        f"{req['outs']} outs",
+    ]
+
+    runners = []
+    if req["runners"]["on_1b"]:
+        runners.append("runner on 1st")
+    if req["runners"]["on_2b"]:
+        runners.append("runner on 2nd")
+    if req["runners"]["on_3b"]:
+        runners.append("runner on 3rd")
+
+    if runners:
+        parts.append(", ".join(runners))
+    else:
+        parts.append("bases empty")
+
+    if req["inning"] is not None:
+        parts.append(f"inning {req['inning']}")
+
+    return ", ".join(parts)
+
+
+def step_confidence(step: Dict[str, Any], req: Dict[str, Any]) -> float:
+    """
+    UI-facing confidence, not beam utility.
+    Tries to answer: how strong is this recommendation for this spot?
+    """
+    w = step["why"]
+    balls = req["balls"]
+    strikes = req["strikes"]
+
+    if balls == 3:
+        # In 3-ball counts, reward reliable strike / avoid walk
+        conf = max(
+            w.get("P(STRIKE)", 0.0),
+            w.get("P(K)", 0.0) + 0.35 * w.get("P(BIP_OUT)", 0.0)
+        )
+    elif strikes == 2:
+        # In two-strike counts, emphasize putaway potential
+        conf = w.get("P(K)", 0.0) + 0.35 * w.get("P(BIP_OUT)", 0.0)
+    else:
+        # Neutral counts: a blend of strike + outcome quality
+        conf = max(
+            w.get("P(STRIKE)", 0.0),
+            w.get("P(K)", 0.0) + 0.35 * w.get("P(BIP_OUT)", 0.0)
+        )
+
+    return float(max(0.0, min(0.99, conf)))
+
+
+def step_reason(step: Dict[str, Any], req: Dict[str, Any]) -> str:
+    w = step["why"]
+    balls = req["balls"]
+    strikes = req["strikes"]
+
+    p_k = w.get("P(K)", 0.0)
+    p_bip = w.get("P(BIP_OUT)", 0.0)
+    p_bb = w.get("P(BB)", 0.0)
+    p_hit = w.get("P(HIT)", 0.0)
+    p_strike = w.get("P(STRIKE)", 0.0)
+
+    if balls == 3 and p_strike >= 0.60:
+        return "Get ahead with a reliable strike in a hitter's count"
+    if p_k >= 0.50:
+        return "Strong putaway option with the best strikeout profile"
+    if p_bip >= 0.20 and p_hit < 0.10:
+        return "Induce weak contact and limit damage"
+    if strikes == 2 and p_k >= 0.35:
+        return "Use as a chase/finish pitch with two strikes"
+    if p_bb <= 0.03 and p_hit <= 0.06:
+        return "Safer option that limits walk and hit risk"
+    return "Best overall option based on matchup, count, and contact risk"
+
+
+def build_pitch_card(step: Dict[str, Any], req: Dict[str, Any]) -> Dict[str, Any]:
+    conf = step_confidence(step, req)
+    pitch_type = step["pitch_type"]
+
+    return {
+        "step": step["step"],
+        "pitch_action": step["pitch_action"],
+        "pitch_type": pitch_type,
+        "location": step["loc_bucket"],
+        "location_description": location_description(step["loc_bucket"], req["stand"]),
+        "display_name": PITCH_DISPLAY_NAMES.get(pitch_type, pitch_type),
+        "confidence": round(conf, 4),
+        "confidence_label": format_percent(conf),
+        "reason": step_reason(step, req),
+        "score": round(step["step_score_exp"], 4),
+        "probabilities": {
+            "k": round(step["why"].get("P(K)", 0.0), 4),
+            "bip_out": round(step["why"].get("P(BIP_OUT)", 0.0), 4),
+            "bb": round(step["why"].get("P(BB)", 0.0), 4),
+            "hit": round(step["why"].get("P(HIT)", 0.0), 4),
+            "ball": round(step["why"].get("P(BALL)", 0.0), 4),
+            "strike": round(step["why"].get("P(STRIKE)", 0.0), 4),
+            "foul": round(step["why"].get("P(FOUL)", 0.0), 4),
+        },
+    }
+
+
+def build_ui_summary(req: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "title": "Recommended Pitch Sequence",
+        "subtitle": f"vs. Batter {req['batter_id']}",
+        "applied_scenario": build_applied_scenario(req),
+        "analysis": (
+            f"Based on batter/pitcher matchup, count {req['balls']}-{req['strikes']}, "
+            f"{req['outs']} outs, and current base state ({req['base_state']})."
+        ),
+    }
+
+ZONE_GRID = {
+    "Z1": ("up", "left"),
+    "Z2": ("up", "middle"),
+    "Z3": ("up", "right"),
+    "Z4": ("middle", "left"),
+    "Z5": ("middle", "middle"),
+    "Z6": ("middle", "right"),
+    "Z7": ("down", "left"),
+    "Z8": ("down", "middle"),
+    "Z9": ("down", "right"),
+}
+
+
+def lateral_from_batter_side(col: str, stand: str) -> str:
+    """
+    Convert pitcher-view left/right into batter-relative in/away.
+    Assumes stand is 'L' or 'R'.
+    """
+    if col == "middle":
+        return "middle"
+
+    stand = (stand or "").upper()
+    if stand == "R":
+        # pitcher-view left = inside to RHB, right = away
+        return "in" if col == "left" else "away"
+    else:
+        # pitcher-view left = away to LHB, right = inside
+        return "away" if col == "left" else "in"
+
+
+def location_description(loc_bucket: str, stand: str) -> str:
+    if loc_bucket == "UNK_LOC":
+        return "unknown location"
+
+    if loc_bucket not in ZONE_GRID:
+        return str(loc_bucket).lower()
+
+    vert, col = ZONE_GRID[loc_bucket]
+    lat = lateral_from_batter_side(col, stand)
+
+    if vert == "middle" and lat == "middle":
+        return "middle"
+    if vert == "middle":
+        return f"middle {lat}"
+    return f"{vert} and {lat}"
 
 def main():
     parser = argparse.ArgumentParser(
@@ -680,8 +925,8 @@ def main():
     )
 
     #Get training model and data to infer pitcher arsenal
-    parser.add_argument("--modeldir", default="models/Test_v5")
-    parser.add_argument("--data", default="data/processed/outcomes_v2.parquet", help="Optional parquet path used to infer pitcher arsenal")
+    parser.add_argument("--modeldir", default="models/Test_vnext")
+    parser.add_argument("--data", default="data/Test/game_pk_data.parquet", help="Optional parquet path used to infer pitcher arsenal")
 
     #Requiring both pitcher and batter for now, this will probably change in the future to only require pitcher
     parser.add_argument("--pitcher", required=True, type=int) #Ptcher and Batter are type int because it the input is the players MLBAM ID number not their name
@@ -698,7 +943,7 @@ def main():
     parser.add_argument("--prev2", default="NONE")
 
     #How many pitcher should be recommended and how many sequences should be recommended
-    parser.add_argument("--depth", type=int, default=4) #how many pitches, anything past 4 pitches will be pretty uselles I think
+    parser.add_argument("--depth", type=int, default=3) #how many pitches, anything past 4 pitches will be pretty uselles I think
     parser.add_argument("--beam_width", type=int, default=1) #how many sequences
 
     #How many sequences should be explained
@@ -721,7 +966,7 @@ def main():
     parser.add_argument("--explain_top", type=int, default=3, help="How many top sequences to explain")
 
     # How many outs are there currently
-    parser.add_argument("--outs", type=int, default=0, choices=[0, 1, 2], help="Outs in inning (0-2)")
+    parser.add_argument("--outs", required=True, type=int, choices=[0, 1, 2], help="Outs in inning (0-2)")
 
     args = parser.parse_args()
 
@@ -765,30 +1010,37 @@ def main():
 
    
 
-    out = {
-        "mode": "sequence",
-        "state": {
-            "pitcher": args.pitcher,
-            "batter": args.batter,
-            "stand": args.stand,
-            "p_throws": args.p_throws,
-            "balls": args.balls,
-            "strikes": args.strikes,
-            "prev_action_1": prev1,
-            "prev_action_2": prev2,
-
-            # baserunners, TTO
-            "inning": args.inning,
-            "inning_bucket": ib,
-            "times_through_order": args.tto,
-            "tto_bucket": tb,
-            "runners": {"on_1b": args.on_1b, "on_2b": args.on_2b, "on_3b": args.on_3b},
-            "base_state": bs,
-            "runners_count": rc,
-            "outs": args.outs,
-            #"risp": is_risp,
+    request_obj = {
+        "pitcher_id": args.pitcher,
+        "batter_id": args.batter,
+        "stand": args.stand,
+        "p_throws": args.p_throws,
+        "balls": args.balls,
+        "strikes": args.strikes,
+        "count": f"{args.balls}-{args.strikes}",
+        "prev_action_1": prev1,
+        "prev_action_2": prev2,
+        "inning": args.inning,
+        "inning_bucket": ib,
+        "tto": args.tto,
+        "tto_bucket": tb,
+        "runners": {
+            "on_1b": args.on_1b,
+            "on_2b": args.on_2b,
+            "on_3b": args.on_3b,
         },
-        "params": {"depth": args.depth, "beam_width": args.beam_width},
+        "base_state": bs,
+        "runners_count": rc,
+        "outs": args.outs,
+    }
+
+    raw_out = {
+        "mode": "sequence",
+        "request": request_obj,
+        "params": {
+            "depth": args.depth,
+            "beam_width": args.beam_width,
+        },
         "sequences": [],
     }
 
@@ -796,7 +1048,7 @@ def main():
     for i in range(topk):
         b = beams[i]
         eb, es = expected_count(b.count_dist)
-        out["sequences"].append(
+        raw_out["sequences"].append(
             {
                 "rank": i + 1,
                 "total_score": b.score,
@@ -807,8 +1059,40 @@ def main():
             }
         )
 
+    top_seq = raw_out["sequences"][0] if raw_out["sequences"] else None
+
+    api_out = {
+        "mode": "sequence",
+        "request": request_obj,
+        "ui_summary": build_ui_summary(request_obj),
+        "top_sequence": None,
+        "alternatives": [],
+        "debug": {
+            "params": raw_out["params"],
+            "raw_sequences": raw_out["sequences"],
+        },
+    }
+
+    if top_seq is not None:
+        api_out["top_sequence"] = {
+            "rank": top_seq["rank"],
+            "total_score": round(top_seq["total_score"], 4),
+            "sequence_text": " → ".join([st["pitch_action"] for st in top_seq["steps"]]),
+            "final_count_exp": top_seq["final_count_exp"],
+            "pitches": [build_pitch_card(step, request_obj) for step in top_seq["steps"]],
+        }
+
+        api_out["alternatives"] = [
+            {
+                "rank": seq["rank"],
+                "total_score": round(seq["total_score"], 4),
+                "sequence_text": " → ".join([st["pitch_action"] for st in seq["steps"]]),
+            }
+            for seq in raw_out["sequences"][1:]
+        ]
+
     if args.json:
-        print(json.dumps(out, indent=2))
+        print(json.dumps(api_out, indent=2))
         return
 
     print("\nPitchSense — Sequence Recommendations (stochastic count)\n")
@@ -821,7 +1105,7 @@ def main():
     if args.data:
         print(f"[INFO] arsenal_source={args.data}\n")
 
-    for seq in out["sequences"]:
+    for seq in raw_out["sequences"]:
         print(f"== Sequence {seq['rank']}  total_score={seq['total_score']:+.4f}")
         #  done={seq['done']} ==")
         #  print(f"  final_count_exp={seq['final_count_exp']}")
@@ -838,16 +1122,17 @@ def main():
                #   f"(pitch={step['pitch_type']:<3} loc={step['loc_bucket']:<2})  "
                # f"exp_count {cb[0]}-{cb[1]} -> {ca[0]}-{ca[1]}  "
                # f"p_term_exp={step['p_terminal_exp']:.3f}  "
+                f"(pitch={step['pitch_type']:<3} loc={step['loc_bucket']:<4}) "
                 f"score_exp={step['step_score_exp']:+.4f}"  #MAP={step['why']['MAP_count']}"
             )
         print()
 
     # Explanation for pitch sequence, basically just stats
-    if args.explain and out["sequences"]:
-        n = max(1, min(args.explain_top, len(out["sequences"])))
+    if args.explain and raw_out["sequences"]:
+        n = max(1, min(args.explain_top, len(raw_out["sequences"])))
         print("\n--- Explanation (top sequences) ---")
         for i in range(n):
-            s = out["sequences"][i]
+            s = raw_out["sequences"][i]
             seq_str = " → ".join([st["pitch_action"] for st in s["steps"]])
             print(f"\n#{i+1} sequence={seq_str}  total_score={s['total_score']:+.4f}")
             for st in s["steps"]:
@@ -855,7 +1140,8 @@ def main():
                 print(
                     f"  step {st['step']}: action={st['pitch_action']:<8} step_score={st['step_score_exp']:+.4f}  "
                     f"P(K)={w['P(K)']:.3f}  P(BIP_OUT)={w['P(BIP_OUT)']:.3f}  "
-                    f"P(BB)={w['P(BB)']:.3f}  P(HIT)={w['P(HIT)']:.3f}"
+                    f"P(BB)={w['P(BB)']:.3f}  P(HIT)={w['P(HIT)']:.3f}  "
+                    f"P(BALL)={w['P(BALL)']:.3f}  P(STRIKE)={w['P(STRIKE)']:.3f}"
                 )
 
     print("\nTip: add --json for full structured count distributions.\n")
